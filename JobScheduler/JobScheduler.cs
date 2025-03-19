@@ -125,11 +125,13 @@ public partial class JobScheduler : IDisposable
     {
         // Round Robin,
         var workerIndex = NextWorkerIndex;
+
         while (!Workers[workerIndex].IncomingQueue.TryEnqueue(job))
         {
             NextWorkerIndex = (NextWorkerIndex + 1) % Workers.Count;
         }
 
+        Workers[workerIndex].Wake();
         NextWorkerIndex = (NextWorkerIndex + 1) % Workers.Count;
     }
 

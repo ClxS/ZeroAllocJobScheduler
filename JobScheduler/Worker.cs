@@ -17,6 +17,8 @@ internal class Worker
     private readonly JobScheduler _jobScheduler;
     private volatile CancellationTokenSource _cancellationToken;
 
+    private AutoResetEvent _workAvailable = new AutoResetEvent(false);
+
     /// <summary>
     /// Creates a new <see cref="Worker"/>.
     /// </summary>
@@ -68,6 +70,14 @@ internal class Worker
     }
 
     /// <summary>
+    /// Signals that this thread now has work available for consumption
+    /// </summary>
+    public void Wake()
+    {
+        _workAvailable.Set();
+    }
+
+    /// <summary>
     /// Runs this instance to process its <see cref="JobHandle"/>s.
     /// Steals from other <see cref="Worker"/>s if its own <see cref="_queue"/> is empty.
     /// </summary>
@@ -114,8 +124,7 @@ internal class Worker
 
                     if (!exists)
                     {
-                        // No work found, yield to give other threads a chance
-                        Thread.Yield();
+                        _workAvailable.WaitOne(1);
                     }
                 }
             }
