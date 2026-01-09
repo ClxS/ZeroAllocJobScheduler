@@ -41,12 +41,12 @@ public partial class JobScheduler : IDisposable
     /// <summary>
     /// A list of all <see cref="WorkStealingDeque{T}"/> of the Workers with <see cref="IJob"/>s that are currently being processed.
     /// </summary>
-    internal List<WorkStealingDeque<JobHandle>> Queues { get; } = new();
+    internal List<WorkStealingDeque<JobHandle>> Queues { get; } = [];
 
     /// <summary>
     /// All active <see cref="Workers"/>.
     /// </summary>
-    internal List<Worker> Workers { get; } = new();
+    internal List<Worker> Workers { get; } = [];
 
     /// <summary>
     /// An index pointing towards the next worker being used to process the next flushed <see cref="IJob"/>.
