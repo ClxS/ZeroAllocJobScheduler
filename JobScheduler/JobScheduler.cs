@@ -9,44 +9,59 @@ using Schedulers.Utils;
 namespace Schedulers;
 
 /// <summary>
-///     A <see cref="JobScheduler"/> schedules and processes <see cref="IJob"/>s asynchronously. Better-suited for larger jobs due to its underlying events.
+///     A <see cref="JobScheduler"/> schedules and processes <see cref="IJob"/>s asynchronously.
+///     Multiple schedulers can share a <see cref="WorkerPool"/> — each scheduler's
+///     <see cref="Wait"/> only steals from its own queues, preventing cross-scheduler contamination.
 /// </summary>
 public partial class JobScheduler : IDisposable
 {
+    private readonly SchedulerQueueSet _queueSet;
+    private readonly bool _ownsPool;
+
     /// <summary>
-    /// Creates an instance and singleton.
+    ///     The <see cref="WorkerPool"/> this scheduler is attached to.
     /// </summary>
-    /// <param name="threads">The amount of worker threads to use. If zero we will use the amount of processors available.</param>
-    public JobScheduler(int threads = 0)
+    public WorkerPool Pool { get; }
+
+    /// <summary>
+    ///     Creates a scheduler with its own dedicated <see cref="WorkerPool"/>.
+    ///     The pool is disposed when this scheduler is disposed.
+    /// </summary>
+    /// <param name="threads">Worker thread count. 0 = processor count.</param>
+    public JobScheduler(int threads = 0) : this(new WorkerPool(threads), ownsPool: true)
     {
-        var amount = threads;
-        if (amount == 0)
-        {
-            amount = Environment.ProcessorCount;
-        }
-
-        for (var index = 0; index < amount; index++)
-        {
-            var worker = new Worker(this, index);
-            Workers.Add(worker);
-            Queues.Add(worker.Queue);
-        }
-
-        foreach (var worker in Workers)
-        {
-            worker.Start();
-        }
     }
 
     /// <summary>
-    /// A list of all <see cref="WorkStealingDeque{T}"/> of the Workers with <see cref="IJob"/>s that are currently being processed.
+    ///     Creates a scheduler that shares an existing <see cref="WorkerPool"/>.
+    ///     The pool is NOT disposed when this scheduler is disposed.
     /// </summary>
-    internal List<WorkStealingDeque<JobHandle>> Queues { get; } = [];
+    /// <param name="pool">The shared worker pool.</param>
+    public JobScheduler(WorkerPool pool) : this(pool, ownsPool: false)
+    {
+    }
 
-    /// <summary>
-    /// All active <see cref="Workers"/>.
-    /// </summary>
-    internal List<Worker> Workers { get; } = [];
+    private JobScheduler(WorkerPool pool, bool ownsPool)
+    {
+        this.Pool = pool;
+        this._ownsPool = ownsPool;
+        this._queueSet = new SchedulerQueueSet(this, pool.ThreadCount);
+        pool.RegisterScheduler(this._queueSet);
+    }
+
+    // Kept for backward compat with Arch internals that read these directly.
+    internal List<WorkStealingDeque<JobHandle>> Queues
+    {
+        get
+        {
+            // Return a view over this scheduler's queues.
+            var list = new List<WorkStealingDeque<JobHandle>>(_queueSet.Queues.Length);
+            list.AddRange(_queueSet.Queues);
+            return list;
+        }
+    }
+
+    internal List<Worker> Workers => this.Pool.Workers;
 
     /// <summary>
     /// An index pointing towards the next worker being used to process the next flushed <see cref="IJob"/>.
@@ -56,9 +71,6 @@ public partial class JobScheduler : IDisposable
     /// <summary>
     /// Creates a new <see cref="JobHandle"/> from a <see cref="IJob"/>.
     /// </summary>
-    /// <param name="iJob">The <see cref="IJob"/>.</param>
-    /// <param name="pooled">Whether the handle should be pooled or not</param>
-    /// <returns>The new created <see cref="JobHandle"/>.</returns>
     public JobHandle Schedule(IJob iJob)
     {
         return JobHandle.Pool.RentJobHandle(iJob);
@@ -71,9 +83,10 @@ public partial class JobScheduler : IDisposable
     public void TryToExecuteRemainingJobs(int max = 0)
     {
         var totalExecuted = 0;
-        for (var i = 0; i < Workers.Count; i++)
+        var queues = _queueSet.Queues;
+        for (var i = 0; i < queues.Length; i++)
         {
-            var nextJob = Workers[i].Queue.TrySteal(out var stolenJob);
+            var nextJob = queues[i].TrySteal(out var stolenJob);
             if (!nextJob)
             {
                 continue;
@@ -91,11 +104,7 @@ public partial class JobScheduler : IDisposable
 
     /// <summary>
     /// Creates a new <see cref="JobHandle"/> from a <see cref="IJob"/> with a <see cref="JobHandle"/> as a parent.
-    /// Links the job to the parent. This allows you to wait for the parent until all of its children have been processed.
     /// </summary>
-    /// <param name="iJob">The <see cref="IJob"/>.</param>
-    /// <param name="parent">The parent <see cref="JobHandle"/>.</param>
-    /// <returns>The new <see cref="JobHandle"/>.</returns>
     public JobHandle Schedule(IJob iJob, JobHandle parent)
     {
         Interlocked.Increment(ref parent.UnfinishedJobs);
@@ -106,47 +115,42 @@ public partial class JobScheduler : IDisposable
 
     /// <summary>
     /// Creates a dependency between two <see cref="JobHandle"/>s.
-    /// The dependent <see cref="JobHandle"/>s is executed after the target <see cref="JobHandle"/> has finished.
-    /// This ensures that a <see cref="JobHandle"/> is executed at a later point in time.
     /// </summary>
-    /// <param name="dependency">The <see cref="JobHandle"/> dependency.</param>
-    /// <param name="dependOn">The <see cref="JobHandle"/> it depends on.</param>
     public void AddDependency(JobHandle dependency, JobHandle dependOn)
     {
         dependOn.GetDependencies().Add(dependency);
     }
 
-
     /// <summary>
-    /// Transfers a <see cref="JobHandle"/> to the <see cref="Workers"/> so that it can be executed.
+    /// Transfers a <see cref="JobHandle"/> to the workers so that it can be executed.
+    /// Uses this scheduler's own incoming queues (not shared with other schedulers).
     /// </summary>
-    /// <param name="job">The <see cref="JobHandle"/>.</param>
     public void Flush(JobHandle job)
     {
-        // Round Robin,
+        var workerCount = Pool.Workers.Count;
         var workerIndex = NextWorkerIndex;
 
-        while (!Workers[workerIndex].IncomingQueue.TryEnqueue(job))
+        while (!_queueSet.IncomingQueues[workerIndex].TryEnqueue(job))
         {
-            NextWorkerIndex = (NextWorkerIndex + 1) % Workers.Count;
+            NextWorkerIndex = (NextWorkerIndex + 1) % workerCount;
         }
 
-        Workers[workerIndex].Wake();
-        NextWorkerIndex = (NextWorkerIndex + 1) % Workers.Count;
+        Pool.Workers[workerIndex].Wake();
+        NextWorkerIndex = (NextWorkerIndex + 1) % workerCount;
     }
 
     /// <summary>
     /// Wait until a <see cref="JobHandle"/> and all its children have been completed.
-    /// Also works on jobs in the meantime.
+    /// Steals work ONLY from this scheduler's queues — not from other schedulers sharing the pool.
     /// </summary>
-    /// <param name="job">The <see cref="JobHandle"/>.</param>
     public void Wait(JobHandle job)
     {
+        var queues = _queueSet.Queues;
         while (job.UnfinishedJobs > 0)
         {
-            for (var i = 0; i < Workers.Count; i++)
+            for (var i = 0; i < queues.Length; i++)
             {
-                var nextJob = Workers[i].Queue.TrySteal(out var stolenJob);
+                var nextJob = queues[i].TrySteal(out var stolenJob);
                 if (!nextJob)
                 {
                     continue;
@@ -160,9 +164,7 @@ public partial class JobScheduler : IDisposable
 
     /// <summary>
     /// Completely ends a <see cref="JobHandle"/> and his children by cleaning it up.
-    /// Transfers dependencies and has them executed.
     /// </summary>
-    /// <param name="job"></param>
     internal void Finish(JobHandle job)
     {
         var unfinishedJobs = Interlocked.Decrement(ref job.UnfinishedJobs);
@@ -194,13 +196,15 @@ public partial class JobScheduler : IDisposable
     }
 
     /// <summary>
-    /// Cleans this instance and terminates all <see cref="Worker"/>s.
+    /// Unregisters this scheduler's queues. If this scheduler owns the pool, disposes it too.
     /// </summary>
     public void Dispose()
     {
-        foreach (var worker in Workers)
+        Pool.UnregisterScheduler(_queueSet);
+
+        if (_ownsPool)
         {
-            worker.Stop();
+            Pool.Dispose();
         }
     }
 }

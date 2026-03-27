@@ -1,4 +1,4 @@
-﻿namespace Schedulers.Utils;
+namespace Schedulers.Utils;
 
 public static class JobSchedulerExtensions
 {
@@ -27,6 +27,7 @@ public static class JobSchedulerExtensions
 
     /// <summary>
     ///     Waits until all submitted <see cref="JobHandle"/>s are finished and processes unfinished jobs on the main thread in the meantime.
+    ///     Steals only from this scheduler's queues — not from other schedulers sharing the same pool.
     /// </summary>
     /// <param name="jobScheduler">The <see cref="JobScheduler"/>.</param>
     /// <param name="jobs">A <see cref="Span{T}"/> of <see cref="JobHandle"/>s to wait for.</param>
@@ -50,10 +51,11 @@ public static class JobSchedulerExtensions
                 break;
             }
 
-            // Steal jobs and process them on the main.
-            for (var i = 0; i < jobScheduler.Workers.Count; i++)
+            // Steal jobs from this scheduler's queues only.
+            var queues = jobScheduler.Queues;
+            for (var i = 0; i < queues.Count; i++)
             {
-                var nextJob = jobScheduler.Workers[i].Queue.TrySteal(out var stolenJob);
+                var nextJob = queues[i].TrySteal(out var stolenJob);
                 if (!nextJob)
                 {
                     continue;
