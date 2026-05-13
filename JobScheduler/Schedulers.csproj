@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
 
@@ -35,7 +35,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <PackageReference Include="CommunityToolkit.HighPerformance" Version="8.4.0" />
+	  <PackageReference Include="CommunityToolkit.HighPerformance" />
 	</ItemGroup>
 
 </Project>
