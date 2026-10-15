@@ -103,6 +103,38 @@ public partial class JobScheduler : IDisposable
     }
 
     /// <summary>
+    /// Executes every job still queued on this scheduler, in its incoming and work-stealing queues, on the calling
+    /// thread. Unlike <see cref="TryToExecuteRemainingJobs"/> this includes flushed jobs no worker has picked up yet, so
+    /// a scheduler can be drained before <see cref="Dispose"/> even while every worker is blocked elsewhere.
+    /// </summary>
+    /// <returns>The number of jobs executed.</returns>
+    public int ExecuteQueuedJobs()
+    {
+        var executed = 0;
+        foreach (var incoming in _queueSet.IncomingQueues)
+        {
+            while (incoming.TryDequeue(out var job))
+            {
+                job.Job.Execute();
+                Finish(job);
+                executed++;
+            }
+        }
+
+        foreach (var queue in _queueSet.Queues)
+        {
+            while (queue.TrySteal(out var job))
+            {
+                job.Job.Execute();
+                Finish(job);
+                executed++;
+            }
+        }
+
+        return executed;
+    }
+
+    /// <summary>
     /// Creates a new <see cref="JobHandle"/> from a <see cref="IJob"/> with a <see cref="JobHandle"/> as a parent.
     /// </summary>
     public JobHandle Schedule(IJob iJob, JobHandle parent)

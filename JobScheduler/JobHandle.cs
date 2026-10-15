@@ -34,6 +34,8 @@ public class JobHandleSoaPool
     /// </summary>
     private readonly JobHandlePool _freeIds;
 
+    private int _rented;
+
     /// <summary>
     /// Creates a new instance.
     /// </summary>
@@ -68,6 +70,8 @@ public class JobHandleSoaPool
             throw new InvalidOperationException("No more handles available");
         }
 
+        Interlocked.Increment(ref _rented);
+
         // Create handle
         return new()
         {
@@ -80,12 +84,18 @@ public class JobHandleSoaPool
     }
 
     /// <summary>
+    /// Handles currently rented and not yet returned, across every scheduler. Diagnostic.
+    /// </summary>
+    public int RentedCount => Volatile.Read(ref _rented);
+
+    /// <summary>
     /// Returns a new or pooled <see cref="JobHandle"/> to the pool.
     /// </summary>
     /// <param name="handle">The <see cref="JobHandle"/>.</param>
     public void ReturnHandle(JobHandle handle)
     {
         _freeIds.ReturnHandle(handle);
+        Interlocked.Decrement(ref _rented);
     }
 }
 
@@ -100,6 +110,11 @@ public struct JobHandle
     /// The <see cref="JobHandleSoaPool"/> for pooling and to reduce allocations.
     /// </summary>
     internal static readonly JobHandleSoaPool Pool = new();
+
+    /// <summary>
+    /// Handles currently rented from the shared pool and not yet returned, across every scheduler. Diagnostic.
+    /// </summary>
+    public static int RentedCount => Pool.RentedCount;
 
     /// <summary>
     /// The index of this <see cref="JobHandle"/>, pointing towards its data inside the <see cref="Pool"/>.
